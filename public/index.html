@@ -73,7 +73,7 @@ function joinGame() {
   const roomId = document.getElementById('roomInput').value.trim() || 'default';
   setLobbyStatus('Connecting...');
 
-  ws = new WebSocket(`ws://${location.host}`);
+  ws = new WebSocket(`wss://${location.host}`);
 
   ws.onopen  = () => ws.send(JSON.stringify({ type: 'join', roomId }));
   ws.onclose = () => setStatus('Disconnected from server.');
@@ -457,4 +457,4 @@ function logMove(move) {
 </script>
 </body>
 </html>
-I am the fucking goat
+I am the goat
