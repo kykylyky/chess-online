@@ -2,32 +2,32 @@ const WebSocket = require('ws');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-
+ 
 const PORT = process.env.PORT || 8080;
-
+ 
 // ─── STATIC FILE SERVER ───────────────────────────────────────────────────────
 const server = http.createServer((req, res) => {
   let filePath = path.join(__dirname, 'public',
     req.url === '/' ? 'index.html' : req.url);
-
+ 
   const ext = path.extname(filePath);
   const contentTypes = {
     '.html': 'text/html',
     '.js':   'application/javascript',
     '.css':  'text/css'
   };
-
+ 
   fs.readFile(filePath, (err, data) => {
     if (err) { res.writeHead(404); res.end('Not found'); return; }
     res.writeHead(200, { 'Content-Type': contentTypes[ext] || 'text/plain' });
     res.end(data);
   });
 });
-
+ 
 // ─── ROOM MANAGEMENT ─────────────────────────────────────────────────────────
 const wss = new WebSocket.Server({ server });
 const rooms = {}; // roomId -> { players: [{ws, color}], gameState: {...} }
-
+ 
 // ─── INITIAL GAME STATE (server's authoritative copy) ─────────────────────────
 function createInitialState() {
   return {
@@ -55,16 +55,12 @@ function createInitialState() {
     turnNumber:      0
   };
 }
-
+ 
 // ─── CAPTURE LOGIC ────────────────────────────────────────────────────────────
-// Called after a move is validated.
-// Checks every enemy piece — if it shares the destination square, mark it dead.
-// Returns a description of what was captured (or null) for the log.
 function processCapturesOnServer(state, toX, toY, movingPlayerColor) {
   const enemyColor = 1 - movingPlayerColor;
   let captured = null;
-
-  // Helper: check an array of pieces and set matching one to [-1,-1]
+ 
   function checkArray(arr, typeName) {
     for (let i = 0; i < arr.length; i++) {
       if (arr[i][0] === toX && arr[i][1] === toY) {
@@ -76,9 +72,8 @@ function processCapturesOnServer(state, toX, toY, movingPlayerColor) {
     }
     return false;
   }
-
+ 
   if (enemyColor === 0) {
-    // Enemy is white — check all white pieces
     if (!checkArray(state.whitePawns,   'pawn'))
     if (!checkArray(state.whiteRooks,   'rook'))
     if (!checkArray(state.whiteKnights, 'knight'))
@@ -94,7 +89,6 @@ function processCapturesOnServer(state, toX, toY, movingPlayerColor) {
       }
     }
   } else {
-    // Enemy is black — check all black pieces
     if (!checkArray(state.blackPawns,   'pawn'))
     if (!checkArray(state.blackRooks,   'rook'))
     if (!checkArray(state.blackKnights, 'knight'))
@@ -110,51 +104,51 @@ function processCapturesOnServer(state, toX, toY, movingPlayerColor) {
       }
     }
   }
-
+ 
   if (captured) {
     state.capturedPieces.push(captured);
   }
-
+ 
   return captured;
 }
-
+ 
 // ─── MOVE APPLICATION ─────────────────────────────────────────────────────────
-// Moves the piece on the server's authoritative state.
-// Returns false if the move is illegal (wrong turn, piece not found).
 function applyMoveOnServer(state, move) {
   const { pieceType, pieceIndex, playerColor, toX, toY } = move;
-
+ 
   // Basic turn check
   if ((state.whiteTurn && playerColor !== 0) ||
       (!state.whiteTurn && playerColor !== 1)) {
     console.warn('[Move rejected] Wrong turn');
     return false;
   }
-
+ 
   // Bounds check
   if (toX < 0 || toX > 7 || toY < 0 || toY > 7) {
     console.warn('[Move rejected] Out of bounds');
     return false;
   }
-
-  // Apply the move to the correct piece array
+ 
   if (pieceType === 0) {
     const arr = playerColor === 0 ? state.whitePawns : state.blackPawns;
     if (!arr[pieceIndex] || arr[pieceIndex][0] === -1) return false;
     arr[pieceIndex] = [toX, toY];
+ 
   } else if (pieceType === 1) {
     const arr = playerColor === 0 ? state.whiteKnights : state.blackKnights;
     if (!arr[pieceIndex] || arr[pieceIndex][0] === -1) return false;
     arr[pieceIndex] = [toX, toY];
+ 
   } else if (pieceType === 2) {
     const arr = playerColor === 0 ? state.whiteBishops : state.blackBishops;
     if (!arr[pieceIndex] || arr[pieceIndex][0] === -1) return false;
     arr[pieceIndex] = [toX, toY];
+ 
   } else if (pieceType === 3) {
     const arr = playerColor === 0 ? state.whiteRooks : state.blackRooks;
     if (!arr[pieceIndex] || arr[pieceIndex][0] === -1) return false;
     arr[pieceIndex] = [toX, toY];
-    // Track rook movement for castling
+    // Track rook movement for castling eligibility
     if (playerColor === 0) {
       if (pieceIndex === 0) state.whiteRookLMoved = true;
       else                  state.whiteRookRMoved = true;
@@ -162,39 +156,69 @@ function applyMoveOnServer(state, move) {
       if (pieceIndex === 0) state.blackRookLMoved = true;
       else                  state.blackRookRMoved = true;
     }
+ 
   } else if (pieceType === 4) {
     const queen = playerColor === 0 ? state.whiteQueen : state.blackQueen;
     if (queen[0] === -1) return false;
     if (playerColor === 0) state.whiteQueen = [toX, toY];
     else                   state.blackQueen = [toX, toY];
+ 
   } else if (pieceType === 5) {
     const king = playerColor === 0 ? state.whiteKing : state.blackKing;
     if (king[0] === -1) return false;
-    if (playerColor === 0) { state.whiteKing = [toX, toY]; state.whiteKingMoved = true; }
-    else                   { state.blackKing = [toX, toY]; state.blackKingMoved = true; }
+ 
+    if (playerColor === 0) {
+      const fromX = state.whiteKing[0];
+      state.whiteKing = [toX, toY];
+      state.whiteKingMoved = true;
+      // castling kingside — king e1(4,0) → g1(6,0), rook h1(7,0) → f1(5,0)
+      if (fromX === 4 && toX === 6 && toY === 0) {
+        state.whiteRooks[1] = [5, 0];
+        state.whiteRookRMoved = true;
+      }
+      // castling queenside — king e1(4,0) → c1(2,0), rook a1(0,0) → d1(3,0)
+      if (fromX === 4 && toX === 2 && toY === 0) {
+        state.whiteRooks[0] = [3, 0];
+        state.whiteRookLMoved = true;
+      }
+    } else {
+      const fromX = state.blackKing[0];
+      state.blackKing = [toX, toY];
+      state.blackKingMoved = true;
+      // castling kingside — king e8(4,7) → g8(6,7), rook h8(7,7) → f8(5,7)
+      if (fromX === 4 && toX === 6 && toY === 7) {
+        state.blackRooks[1] = [5, 7];
+        state.blackRookRMoved = true;
+      }
+      // castling queenside — king e8(4,7) → c8(2,7), rook a8(0,7) → d8(3,7)
+      if (fromX === 4 && toX === 2 && toY === 7) {
+        state.blackRooks[0] = [3, 7];
+        state.blackRookLMoved = true;
+      }
+    }
+ 
   } else {
     console.warn('[Move rejected] Unknown piece type:', pieceType);
     return false;
   }
-
-  // Process captures AFTER moving (so the moving piece's new position is set)
+ 
+  // Process captures AFTER moving so the moving piece's new position is set
   const captured = processCapturesOnServer(state, toX, toY, playerColor);
-
+ 
   // Advance turn and tick cards
   state.whiteTurn = !state.whiteTurn;
   state.turnNumber++;
   tickActiveCardsOnServer(state);
-
+ 
   return true;
 }
-
+ 
 // ─── CARD SYSTEM HOOKS (server-side, future-ready) ───────────────────────────
 function applyCardOnServer(state, card) {
-  // Add to active cards if multi-turn
   if (card.turnsRemaining > 1) {
     state.activeCards.push({ ...card, turnsUsed: 0 });
   }
-
+ 
   // Future card effects go here:
   // switch (card.cardId) {
   //   case 'double_move':   ... break;
@@ -203,49 +227,48 @@ function applyCardOnServer(state, card) {
   //   case 'extra_pawn':    ... break;
   // }
 }
-
+ 
 function tickActiveCardsOnServer(state) {
   state.activeCards = state.activeCards
     .map(c => ({ ...c, turnsUsed: c.turnsUsed + 1 }))
     .filter(c => c.turnsUsed < c.turnsRemaining);
 }
-
+ 
 // ─── WEBSOCKET HANDLER ───────────────────────────────────────────────────────
 wss.on('connection', (ws) => {
   let playerRoom  = null;
   let playerColor = null;
-
+ 
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw); }
     catch { console.warn('Bad JSON from client'); return; }
-
+ 
     // ── JOIN ──────────────────────────────────────────────────────────────────
     if (msg.type === 'join') {
       const roomId = msg.roomId || 'default';
-
+ 
       if (!rooms[roomId]) {
         rooms[roomId] = { players: [], gameState: createInitialState() };
       }
       const room = rooms[roomId];
-
+ 
       if (room.players.length >= 2) {
         ws.send(JSON.stringify({ type: 'error', message: 'Room is full' }));
         return;
       }
-
+ 
       playerColor = room.players.length; // 0 = white, 1 = black
       playerRoom  = roomId;
       room.players.push({ ws, color: playerColor });
-
+ 
       ws.send(JSON.stringify({
         type:   'assigned',
         color:  playerColor,
         roomId
       }));
-
+ 
       if (room.players.length === 2) {
-        // Both players ready — send start + initial state to each
         room.players.forEach(p => p.ws.send(JSON.stringify({
           type:      'start',
           gameState: room.gameState
@@ -254,10 +277,10 @@ wss.on('connection', (ws) => {
       }
       return;
     }
-
+ 
     if (!playerRoom || !rooms[playerRoom]) return;
     const room = rooms[playerRoom];
-
+ 
     // ── MOVE ──────────────────────────────────────────────────────────────────
     if (msg.type === 'move') {
       const ok = applyMoveOnServer(room.gameState, msg.move);
@@ -265,8 +288,7 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'error', message: 'Illegal move rejected' }));
         return;
       }
-
-      // Broadcast the authoritative post-capture state to BOTH players
+ 
       const broadcast = JSON.stringify({
         type:      'state_update',
         gameState: room.gameState,
@@ -276,7 +298,7 @@ wss.on('connection', (ws) => {
       room.players.forEach(p => {
         if (p.ws.readyState === WebSocket.OPEN) p.ws.send(broadcast);
       });
-
+ 
       // Check for game over (king captured)
       const wk = room.gameState.whiteKing;
       const bk = room.gameState.blackKing;
@@ -291,11 +313,11 @@ wss.on('connection', (ws) => {
       }
       return;
     }
-
+ 
     // ── CARD ──────────────────────────────────────────────────────────────────
     if (msg.type === 'card') {
       applyCardOnServer(room.gameState, msg.card);
-
+ 
       const broadcast = JSON.stringify({
         type:      'state_update',
         gameState: room.gameState,
@@ -307,7 +329,7 @@ wss.on('connection', (ws) => {
       });
       return;
     }
-
+ 
     // ── SYNC REQUEST (e.g. on reconnect) ─────────────────────────────────────
     if (msg.type === 'sync_request') {
       ws.send(JSON.stringify({
@@ -317,7 +339,7 @@ wss.on('connection', (ws) => {
       return;
     }
   });
-
+ 
   // ── DISCONNECT ───────────────────────────────────────────────────────────
   ws.on('close', () => {
     if (playerRoom && rooms[playerRoom]) {
@@ -334,7 +356,8 @@ wss.on('connection', (ws) => {
     }
   });
 });
-
+ 
 server.listen(PORT, () => {
   console.log(`Chess server running at http://localhost:${PORT}`);
 });
+ 
