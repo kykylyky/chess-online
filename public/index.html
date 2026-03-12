@@ -17,6 +17,7 @@
     .dark    { background: #b58863; }
     .cell.selected   { outline: 4px solid #00ff00; outline-offset: -4px; }
     .cell.valid-move { background: rgba(0,200,0,0.40) !important; }
+    .cell.in-check   { background: rgba(255,0,0,0.50) !important; }
     #lobby   { display: flex; flex-direction: column; align-items: center; gap: 12px; }
     #game    { display: none; flex-direction: column; align-items: center; gap: 8px; }
     input    { padding: 8px 12px; font-size: 16px; border-radius: 4px; border: none; width: 240px; }
@@ -30,7 +31,7 @@
   </style>
 </head>
 <body>
-
+ 
 <!-- LOBBY -->
 <div id="lobby">
   <h2 style="margin:0">♟ Chess Online</h2>
@@ -38,7 +39,7 @@
   <button onclick="joinGame()">Join Game</button>
   <div id="lobbyStatus" style="font-size:14px;color:#aaa"></div>
 </div>
-
+ 
 <!-- GAME -->
 <div id="game">
   <div id="status"></div>
@@ -46,57 +47,53 @@
   <div id="board"></div>
   <div id="moveLog"></div>
 </div>
-
+ 
 <script>
 // ─── PIECE UNICODE ────────────────────────────────────────────────────────────
 const GLYPHS = {
   wP:'♙', wN:'♘', wB:'♗', wR:'♖', wQ:'♕', wK:'♔',
   bP:'♟', bN:'♞', bB:'♝', bR:'♜', bQ:'♛', bK:'♚'
 };
-
+ 
 // ─── MOVE TABLES ─────────────────────────────────────────────────────────────
 const kingm   = [[1,0],[1,1],[0,1],[-1,1],[-1,0],[0,-1],[1,-1],[-1,-1]];
 const knightm = [[2,1],[1,2],[-1,2],[-2,1],[-2,-1],[-1,-2],[1,-2],[2,-1]];
-const pawnm  = [[0,1],[1,1],[-1,1],[0,2]];    // white moves up
-const bpawnm = [[0,-1],[1,-1],[-1,-1],[0,-2]]; // black moves down
-
+const pawnm  = [[0,1],[1,1],[-1,1],[0,2]];
+const bpawnm = [[0,-1],[1,-1],[-1,-1],[0,-2]];
+ 
 // ─── CLIENT STATE ─────────────────────────────────────────────────────────────
-let state         = null;   // always overwritten by server
-let myColor       = null;   // 0=white 1=black
-let selectedPiece = null;   // { type, index, color }
-let validMoves    = [];     // [{x,y}]
+let state         = null;
+let myColor       = null;
+let selectedPiece = null;
+let validMoves    = [];
 let gameActive    = false;
 let ws            = null;
-
+ 
 // ─── NETWORKING ───────────────────────────────────────────────────────────────
 function joinGame() {
   const roomId = document.getElementById('roomInput').value.trim() || 'default';
   setLobbyStatus('Connecting...');
-
   ws = new WebSocket(`wss://${location.host}`);
-
   ws.onopen  = () => ws.send(JSON.stringify({ type: 'join', roomId }));
   ws.onclose = () => setStatus('Disconnected from server.');
-
   ws.onmessage = (e) => {
     let msg;
     try { msg = JSON.parse(e.data); } catch { return; }
     handleServerMessage(msg);
   };
 }
-
+ 
 function handleServerMessage(msg) {
   switch (msg.type) {
-
+ 
     case 'assigned':
       myColor = msg.color;
       setLobbyStatus(
         `You are ${myColor === 0 ? '⬜ White' : '⬛ Black'}. Waiting for opponent...`
       );
       break;
-
+ 
     case 'start':
-      // Server sends initial state on start
       state = msg.gameState;
       document.getElementById('lobby').style.display = 'none';
       document.getElementById('game').style.display  = 'flex';
@@ -104,39 +101,36 @@ function handleServerMessage(msg) {
       renderBoard();
       updateStatus();
       break;
-
-    // Server has processed the move + captures and sends back authoritative state
+ 
     case 'state_update':
       state = msg.gameState;
       selectedPiece = null;
       validMoves    = [];
       renderBoard();
-      updateStatus();
+      checkForCheckOrMate();
       if (msg.move) logMove(msg.move);
       break;
-
+ 
     case 'game_over':
       renderBoard();
       setStatus(`🏆 ${msg.winner} wins!`);
       gameActive = false;
       break;
-
+ 
     case 'opponent_disconnected':
       setStatus('Opponent disconnected.');
       gameActive = false;
       break;
-
+ 
     case 'error':
       console.warn('Server error:', msg.message);
-      // If our move was rejected, re-enable input so the player can try again
       selectedPiece = null;
       validMoves    = [];
       renderBoard();
       break;
   }
 }
-
-// Send a move to the server — server will apply it, process captures, broadcast result
+ 
 function sendMove(pieceType, pieceIndex, playerColor, fromX, fromY, toX, toY) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   ws.send(JSON.stringify({
@@ -144,8 +138,7 @@ function sendMove(pieceType, pieceIndex, playerColor, fromX, fromY, toX, toY) {
     move: { pieceType, pieceIndex, playerColor, fromX, fromY, toX, toY }
   }));
 }
-
-// Future: send a card play to the server
+ 
 function sendCard(cardData) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   ws.send(JSON.stringify({
@@ -162,13 +155,11 @@ function sendCard(cardData) {
     }
   }));
 }
-
-// ─── MOVE VALIDATION (client-side, for highlighting only) ────────────────────
-// The server is authoritative. This is only used to show the player
-// which squares are legal before they click.
-
+ 
+// ─── MOVE VALIDATION ─────────────────────────────────────────────────────────
+ 
 function inBounds(x, y) { return x >= 0 && x <= 7 && y >= 0 && y <= 7; }
-
+ 
 function isOccupiedByColor(x, y, color) {
   if (!state) return false;
   const s = state;
@@ -182,24 +173,25 @@ function isOccupiedByColor(x, y, color) {
   const king  = color === 0 ? s.whiteKing  : s.blackKing;
   return (queen[0]===x&&queen[1]===y) || (king[0]===x&&king[1]===y);
 }
-
+ 
 function isOccupied(x, y) {
   return isOccupiedByColor(x, y, 0) || isOccupiedByColor(x, y, 1);
 }
-
+ 
 function slideMoves(pos, dirs, color, out) {
   const [ox, oy] = pos;
   for (const [dx, dy] of dirs) {
     for (let step = 1; step <= 7; step++) {
       const tx = ox + dx * step, ty = oy + dy * step;
       if (!inBounds(tx, ty)) break;
-      if (isOccupiedByColor(tx, ty, color)) break;        // friendly blocks
+      if (isOccupiedByColor(tx, ty, color)) break;
       out.push({ x: tx, y: ty });
-      if (isOccupiedByColor(tx, ty, 1 - color)) break;   // capture, then stop
+      if (isOccupiedByColor(tx, ty, 1 - color)) break;
     }
   }
 }
-
+ 
+// Returns true if square (tx,ty) is attacked by attackerColor
 function isSquareAttackedBy(tx, ty, attackerColor) {
   if (!state) return false;
   const s = state;
@@ -210,15 +202,15 @@ function isSquareAttackedBy(tx, ty, attackerColor) {
   const queen   = attackerColor === 0 ? s.whiteQueen   : s.blackQueen;
   const king    = attackerColor === 0 ? s.whiteKing    : s.blackKing;
   const capDirs = attackerColor === 0 ? [pawnm[1], pawnm[2]] : [bpawnm[1], bpawnm[2]];
-
+ 
   for (const p of pawns)
     for (const [dx, dy] of capDirs)
       if (p[0]+dx===tx && p[1]+dy===ty) return true;
-
+ 
   for (const k of knights)
     for (const [dx, dy] of knightm)
       if (k[0]+dx===tx && k[1]+dy===ty) return true;
-
+ 
   function slideTo(from, dirs) {
     for (const [dx, dy] of dirs)
       for (let s = 1; s <= 7; s++) {
@@ -229,133 +221,274 @@ function isSquareAttackedBy(tx, ty, attackerColor) {
       }
     return false;
   }
-
+ 
   const rookDirs   = [[1,0],[-1,0],[0,1],[0,-1]];
   const bishopDirs = [[1,1],[-1,1],[-1,-1],[1,-1]];
-
+ 
   for (const r of rooks)   if (slideTo(r,   rookDirs))   return true;
   for (const b of bishops) if (slideTo(b,   bishopDirs)) return true;
   if (slideTo(queen, [...rookDirs, ...bishopDirs]))        return true;
-
+ 
   for (const [dx, dy] of kingm)
     if (king[0]+dx===tx && king[1]+dy===ty) return true;
-
+ 
   return false;
 }
-
+ 
+// Returns true if the given color's king is currently in check
+function isInCheck(color) {
+  if (!state) return false;
+  const king = color === 0 ? state.whiteKing : state.blackKing;
+  return isSquareAttackedBy(king[0], king[1], 1 - color);
+}
+ 
+// Deep-copy the position arrays and apply a single piece move on the copy,
+// then temporarily swap state so isInCheck can run against it
+function moveLeavesKingInCheck(arrName, idx, toX, toY, color) {
+  const saved = state;
+ 
+  // shallow-copy top level, deep-copy only the arrays that matter
+  const copy = {
+    whitePawns:   state.whitePawns.map(p=>[...p]),
+    blackPawns:   state.blackPawns.map(p=>[...p]),
+    whiteKnights: state.whiteKnights.map(p=>[...p]),
+    blackKnights: state.blackKnights.map(p=>[...p]),
+    whiteBishops: state.whiteBishops.map(p=>[...p]),
+    blackBishops: state.blackBishops.map(p=>[...p]),
+    whiteRooks:   state.whiteRooks.map(p=>[...p]),
+    blackRooks:   state.blackRooks.map(p=>[...p]),
+    whiteQueen:   [...state.whiteQueen],
+    blackQueen:   [...state.blackQueen],
+    whiteKing:    [...state.whiteKing],
+    blackKing:    [...state.blackKing],
+    whiteTurn:    state.whiteTurn,
+    whiteKingMoved:  state.whiteKingMoved,
+    blackKingMoved:  state.blackKingMoved,
+    whiteRookLMoved: state.whiteRookLMoved,
+    whiteRookRMoved: state.whiteRookRMoved,
+    blackRookLMoved: state.blackRookLMoved,
+    blackRookRMoved: state.blackRookRMoved,
+    capturedPieces: [],
+    activeCards: [],
+    turnNumber: state.turnNumber
+  };
+ 
+  // apply the move
+  if (Array.isArray(copy[arrName][idx])) {
+    copy[arrName][idx][0] = toX;
+    copy[arrName][idx][1] = toY;
+  } else {
+    copy[arrName][0] = toX;
+    copy[arrName][1] = toY;
+  }
+ 
+  state = copy;
+  const result = isInCheck(color);
+  state = saved;
+  return result;
+}
+ 
+function getPieceArrayName(pieceType, color) {
+  const names = color === 0
+    ? ['whitePawns','whiteKnights','whiteBishops','whiteRooks','whiteQueen','whiteKing']
+    : ['blackPawns','blackKnights','blackBishops','blackRooks','blackQueen','blackKing'];
+  return names[pieceType];
+}
+ 
+// Returns valid moves filtered to only legal ones (don't leave own king in check)
+function getLegalMoves(pieceType, pieceIndex, color) {
+  const raw     = getValidMoves(pieceType, pieceIndex, color);
+  const arrName = getPieceArrayName(pieceType, color);
+  return raw.filter(m => !moveLeavesKingInCheck(arrName, pieceIndex, m.x, m.y, color));
+}
+ 
+// Returns true if the given color has at least one legal move available
+function hasLegalMoves(color) {
+  const s = state;
+  const pawns   = color === 0 ? s.whitePawns   : s.blackPawns;
+  const knights = color === 0 ? s.whiteKnights : s.blackKnights;
+  const bishops = color === 0 ? s.whiteBishops : s.blackBishops;
+  const rooks   = color === 0 ? s.whiteRooks   : s.blackRooks;
+ 
+  for (let i = 0; i < pawns.length;   i++) if (getLegalMoves(0, i, color).length > 0) return true;
+  for (let i = 0; i < knights.length; i++) if (getLegalMoves(1, i, color).length > 0) return true;
+  for (let i = 0; i < bishops.length; i++) if (getLegalMoves(2, i, color).length > 0) return true;
+  for (let i = 0; i < rooks.length;   i++) if (getLegalMoves(3, i, color).length > 0) return true;
+  if (getLegalMoves(4, 0, color).length > 0) return true;
+  if (getLegalMoves(5, 0, color).length > 0) return true;
+  return false;
+}
+ 
 function getValidMoves(pieceType, pieceIndex, color) {
   const s = state;
   const moves = [];
-
+ 
   if (pieceType === 0) {
     const pos      = color === 0 ? s.whitePawns[pieceIndex] : s.blackPawns[pieceIndex];
     const dirs     = color === 0 ? pawnm : bpawnm;
     const startRow = color === 0 ? 1 : 6;
     const [x, y]   = pos;
-
-    // forward one
+ 
     const [fx, fy]     = [x + dirs[0][0], y + dirs[0][1]];
     const forwardClear = inBounds(fx, fy) && !isOccupied(fx, fy);
     if (forwardClear) moves.push({ x: fx, y: fy });
-
-    // diagonal captures
+ 
     for (let d = 1; d <= 2; d++) {
       const [cx, cy] = [x + dirs[d][0], y + dirs[d][1]];
       if (inBounds(cx, cy) && isOccupiedByColor(cx, cy, 1 - color))
         moves.push({ x: cx, y: cy });
     }
-
-    // double move — only from starting row and only if single step is clear
+ 
     if (y === startRow && forwardClear) {
       const [dx, dy] = [x + dirs[3][0], y + dirs[3][1]];
       if (inBounds(dx, dy) && !isOccupied(dx, dy))
         moves.push({ x: dx, y: dy });
     }
-  }
-  else if (pieceType === 1) { // knight
+ 
+  } else if (pieceType === 1) {
     const [x, y] = color === 0 ? s.whiteKnights[pieceIndex] : s.blackKnights[pieceIndex];
     for (const [dx, dy] of knightm) {
       const [tx, ty] = [x+dx, y+dy];
       if (inBounds(tx, ty) && !isOccupiedByColor(tx, ty, color))
         moves.push({ x: tx, y: ty });
     }
-
-  } else if (pieceType === 2) { // bishop
+ 
+  } else if (pieceType === 2) {
     const pos = color === 0 ? s.whiteBishops[pieceIndex] : s.blackBishops[pieceIndex];
     slideMoves(pos, [[1,1],[-1,1],[-1,-1],[1,-1]], color, moves);
-
-  } else if (pieceType === 3) { // rook
+ 
+  } else if (pieceType === 3) {
     const pos = color === 0 ? s.whiteRooks[pieceIndex] : s.blackRooks[pieceIndex];
     slideMoves(pos, [[1,0],[-1,0],[0,1],[0,-1]], color, moves);
-
-  } else if (pieceType === 4) { // queen
+ 
+  } else if (pieceType === 4) {
     const pos = color === 0 ? s.whiteQueen : s.blackQueen;
     slideMoves(pos, [[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,1],[-1,-1],[1,-1]], color, moves);
-
-  } else if (pieceType === 5) { // king
+ 
+  } else if (pieceType === 5) {
     const [x, y] = color === 0 ? s.whiteKing : s.blackKing;
+ 
+    // normal king moves — one square in any direction, not attacked
     for (const [dx, dy] of kingm) {
       const [tx, ty] = [x+dx, y+dy];
       if (inBounds(tx, ty) && !isOccupiedByColor(tx, ty, color)
           && !isSquareAttackedBy(tx, ty, 1 - color))
         moves.push({ x: tx, y: ty });
     }
+ 
+    // castling kingside (white: e1→g1, rook h1→f1)
+    if (color === 0 && !s.whiteKingMoved && !s.whiteRookRMoved
+        && !isOccupied(5,0) && !isOccupied(6,0)
+        && !isInCheck(0)
+        && !isSquareAttackedBy(5,0,1) && !isSquareAttackedBy(6,0,1)) {
+      moves.push({ x: 6, y: 0, castling: 'kingside' });
+    }
+    // castling kingside (black: e8→g8, rook h8→f8)
+    if (color === 1 && !s.blackKingMoved && !s.blackRookRMoved
+        && !isOccupied(5,7) && !isOccupied(6,7)
+        && !isInCheck(1)
+        && !isSquareAttackedBy(5,7,0) && !isSquareAttackedBy(6,7,0)) {
+      moves.push({ x: 6, y: 7, castling: 'kingside' });
+    }
+ 
+    // castling queenside (white: e1→c1, rook a1→d1)
+    if (color === 0 && !s.whiteKingMoved && !s.whiteRookLMoved
+        && !isOccupied(1,0) && !isOccupied(2,0) && !isOccupied(3,0)
+        && !isInCheck(0)
+        && !isSquareAttackedBy(2,0,1) && !isSquareAttackedBy(3,0,1)) {
+      moves.push({ x: 2, y: 0, castling: 'queenside' });
+    }
+    // castling queenside (black: e8→c8, rook a8→d8)
+    if (color === 1 && !s.blackKingMoved && !s.blackRookLMoved
+        && !isOccupied(1,7) && !isOccupied(2,7) && !isOccupied(3,7)
+        && !isInCheck(1)
+        && !isSquareAttackedBy(2,7,0) && !isSquareAttackedBy(3,7,0)) {
+      moves.push({ x: 2, y: 7, castling: 'queenside' });
+    }
   }
-
+ 
   return moves;
 }
-
+ 
+// ─── CHECK / CHECKMATE / STALEMATE ───────────────────────────────────────────
+ 
+function checkForCheckOrMate() {
+  if (!state || !gameActive) return;
+ 
+  const currentColor = state.whiteTurn ? 0 : 1;
+  const inCheck      = isInCheck(currentColor);
+  const hasMoves     = hasLegalMoves(currentColor);
+ 
+  if (!hasMoves) {
+    if (inCheck) {
+      const winner = currentColor === 0 ? 'Black' : 'White';
+      setStatus(`♚ Checkmate! ${winner} wins!`);
+      gameActive = false;
+    } else {
+      setStatus(`🤝 Stalemate! It's a draw.`);
+      gameActive = false;
+    }
+    return;
+  }
+ 
+  if (inCheck) {
+    const side = currentColor === 0 ? 'White' : 'Black';
+    setStatus(`⚠️ ${side} is in check!`);
+    return;
+  }
+ 
+  updateStatus();
+}
+ 
 // ─── CLICK HANDLING ───────────────────────────────────────────────────────────
+ 
 function onCellClick(x, y) {
   if (!gameActive || !isMyTurn()) return;
-
+ 
   if (selectedPiece) {
     const move = validMoves.find(m => m.x === x && m.y === y);
     if (move) {
       const pos = getPiecePos(selectedPiece.type, selectedPiece.index, selectedPiece.color);
-      // Send to server — server applies move + captures, then broadcasts state_update
       sendMove(
         selectedPiece.type, selectedPiece.index, selectedPiece.color,
         pos[0], pos[1], x, y
       );
       selectedPiece = null;
       validMoves    = [];
-      // Don't re-render yet — wait for server's state_update
       return;
     }
-    // Deselect
     selectedPiece = null;
     validMoves    = [];
   }
-
-  // Try to select one of my pieces
+ 
   const piece = findMyPieceAt(x, y);
   if (piece) {
     selectedPiece = piece;
-    validMoves    = getValidMoves(piece.type, piece.index, piece.color);
+    // use getLegalMoves so pinned pieces and check-blocking are respected
+    validMoves = getLegalMoves(piece.type, piece.index, piece.color);
   }
   renderBoard();
 }
-
+ 
 function findMyPieceAt(x, y) {
   const s = state;
   const color = myColor;
   const arrays = color === 0
     ? [s.whitePawns, s.whiteKnights, s.whiteBishops, s.whiteRooks]
     : [s.blackPawns, s.blackKnights, s.blackBishops, s.blackRooks];
-
+ 
   for (let t = 0; t < 4; t++)
     for (let i = 0; i < arrays[t].length; i++)
       if (arrays[t][i][0] === x && arrays[t][i][1] === y)
         return { type: t, index: i, color };
-
+ 
   const queen = color === 0 ? s.whiteQueen : s.blackQueen;
   const king  = color === 0 ? s.whiteKing  : s.blackKing;
   if (queen[0]===x && queen[1]===y) return { type: 4, index: 0, color };
   if (king[0]===x  && king[1]===y)  return { type: 5, index: 0, color };
   return null;
 }
-
+ 
 function getPiecePos(type, index, color) {
   const s = state;
   if (type === 0) return color===0 ? s.whitePawns[index]   : s.blackPawns[index];
@@ -365,8 +498,9 @@ function getPiecePos(type, index, color) {
   if (type === 4) return color===0 ? s.whiteQueen : s.blackQueen;
   if (type === 5) return color===0 ? s.whiteKing  : s.blackKing;
 }
-
+ 
 // ─── RENDERING ────────────────────────────────────────────────────────────────
+ 
 function getPieceGlyph(x, y) {
   const s = state;
   for (const p of s.whitePawns)   if (p[0]===x&&p[1]===y) return GLYPHS.wP;
@@ -383,43 +517,48 @@ function getPieceGlyph(x, y) {
   if (s.blackKing[0]===x &&s.blackKing[1]===y)  return GLYPHS.bK;
   return '';
 }
-
+ 
 function renderBoard() {
   if (!state) return;
   const board = document.getElementById('board');
   board.innerHTML = '';
-
-  // If black, flip the board so your pieces are at the bottom
+ 
   const flipped = myColor === 1;
-
+ 
+  // work out if the current player's king is in check so we can highlight it red
+  const currentColor   = state.whiteTurn ? 0 : 1;
+  const kingInCheck    = isInCheck(currentColor);
+  const checkedKingPos = kingInCheck
+    ? (currentColor === 0 ? state.whiteKing : state.blackKing)
+    : null;
+ 
   for (let rowIdx = 0; rowIdx < 8; rowIdx++) {
     for (let colIdx = 0; colIdx < 8; colIdx++) {
-      // Flipped: row 0 on screen = row 7 on board, col 0 = col 7
       const col = flipped ? 7 - colIdx : colIdx;
       const row = flipped ? rowIdx     : 7 - rowIdx;
-
+ 
       const cell = document.createElement('div');
-
-      // Flip the square colors too so a1 stays dark regardless of perspective
       const isLight = (col + row) % 2 !== 0;
       cell.className = 'cell ' + (isLight ? 'light' : 'dark');
-
       cell.dataset.x = col;
       cell.dataset.y = row;
       cell.textContent = getPieceGlyph(col, row);
-
+ 
+      // red highlight on the king when in check
+      if (checkedKingPos && checkedKingPos[0] === col && checkedKingPos[1] === row)
+        cell.classList.add('in-check');
+ 
       if (selectedPiece) {
         const pos = getPiecePos(selectedPiece.type, selectedPiece.index, selectedPiece.color);
         if (pos && pos[0] === col && pos[1] === row) cell.classList.add('selected');
       }
       if (validMoves.some(m => m.x === col && m.y === row)) cell.classList.add('valid-move');
-
+ 
       cell.addEventListener('click', () => onCellClick(col, row));
       board.appendChild(cell);
     }
   }
-
-  // Show captured pieces
+ 
   const capturedDiv = document.getElementById('captured');
   const typeToGlyph = { pawn:'P', knight:'N', bishop:'B', rook:'R', queen:'Q', king:'K' };
   const colorPrefix = { 0:'w', 1:'b' };
@@ -427,23 +566,24 @@ function renderBoard() {
     .map(c => GLYPHS[colorPrefix[c.color] + typeToGlyph[c.type]] || '?')
     .join(' ');
 }
-
+ 
 function updateStatus() {
   if (!state) return;
   const myTurn = isMyTurn();
   const side   = state.whiteTurn ? 'White' : 'Black';
   setStatus(myTurn ? `Your turn (${side})` : `Opponent's turn (${side})`);
 }
-
+ 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
+ 
 function isMyTurn() {
   if (!state) return false;
   return (state.whiteTurn && myColor === 0) || (!state.whiteTurn && myColor === 1);
 }
-
+ 
 function setStatus(txt)      { document.getElementById('status').textContent = txt; }
 function setLobbyStatus(txt) { document.getElementById('lobbyStatus').textContent = txt; }
-
+ 
 function logMove(move) {
   const cols  = 'abcdefgh';
   const names = ['Pawn','Knight','Bishop','Rook','Queen','King'];
@@ -457,4 +597,3 @@ function logMove(move) {
 </script>
 </body>
 </html>
-I am the goat
